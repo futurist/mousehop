@@ -219,6 +219,8 @@ fn send_keyboard_input(ki: KEYBDINPUT) {
     });
 }
 
+/// Convert a union-relative desktop coordinate into the 0..=65535
+/// range expected by `SendInput` absolute mouse motion.
 fn normalize_absolute_axis(pos: i32, size: u32) -> i32 {
     let max_index = i64::from(size.saturating_sub(1));
     if max_index <= 0 {
@@ -349,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_absolute_axis_handles_single_pixel_extent() {
+    fn normalize_absolute_axis_handles_degenerate_extents() {
         assert_eq!(normalize_absolute_axis(0, 0), 0);
         assert_eq!(normalize_absolute_axis(0, 1), 0);
         assert_eq!(normalize_absolute_axis(10, 1), 0);
