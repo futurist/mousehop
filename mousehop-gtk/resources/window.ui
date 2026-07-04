@@ -192,6 +192,17 @@
                             </child>
                           </object>
                         </child>
+                        <child>
+                          <object class="AdwActionRow" id="macos_command_as_control_row">
+                            <property name="title" translatable="yes">Command acts as Control</property>
+                            <property name="subtitle" translatable="yes">On this Mac, send ⌘ as Ctrl when the target peer is Windows or Linux.</property>
+                            <child type="suffix">
+                              <object class="GtkSwitch" id="macos_command_as_control_switch">
+                                <property name="valign">center</property>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
                       </object>
                     </child>
                     <child>

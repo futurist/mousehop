@@ -37,6 +37,9 @@ pub enum ProtocolError {
     /// position type does not exist
     #[error("invalid event id: `{0}`")]
     InvalidPosition(#[from] TryFromPrimitiveError<Position>),
+    /// peer-platform type does not exist
+    #[error("invalid peer platform id: `{0}`")]
+    InvalidPeerPlatform(#[from] TryFromPrimitiveError<PeerPlatform>),
     /// clipboard payload exceeds [`MAX_CLIPBOARD_SIZE`]
     #[error("clipboard payload too large: {0} bytes")]
     ClipboardTooLarge(usize),
@@ -67,6 +70,35 @@ impl Display for Position {
             Position::Bottom => "bottom",
         };
         write!(f, "{pos}")
+    }
+}
+
+/// High-level OS class of a Mousehop peer. Used for small
+/// cross-platform behavior toggles where Wayland/X11 distinctions do
+/// not matter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum PeerPlatform {
+    Unknown,
+    MacOs,
+    Windows,
+    Linux,
+}
+
+impl PeerPlatform {
+    pub const fn current() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self::MacOs
+        }
+        #[cfg(windows)]
+        {
+            Self::Windows
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            Self::Linux
+        }
     }
 }
 
@@ -124,6 +156,12 @@ pub enum ProtoEvent {
     /// from `shadow_rs`'s `SHORT_COMMIT`, surfaced in the GUI as the
     /// peer's build. Construct via [`ProtoEvent::hello`].
     Hello { magic: [u8; 8], commit: [u8; 8] },
+    /// Peer's high-level OS class. Sent alongside the Hello
+    /// handshake so the sender can apply opt-in platform-specific
+    /// outgoing transforms (for example, macOS Command behaving like
+    /// Control on Windows/Linux targets). Older peers safely ignore
+    /// this event.
+    PeerPlatform(PeerPlatform),
     /// The receiver's per-pair motion-sensitivity multiplier.
     /// Sent by the emulating peer immediately after the
     /// [`ProtoEvent::Ack`] of an [`ProtoEvent::Enter`] so the
@@ -181,6 +219,7 @@ impl Display for ProtoEvent {
                     write!(f, "Hello(foreign:{s})")
                 }
             }
+            ProtoEvent::PeerPlatform(platform) => write!(f, "PeerPlatform({platform:?})"),
             ProtoEvent::Clipboard {
                 from_fingerprint,
                 content,
@@ -220,6 +259,7 @@ pub enum EventType {
     MotionAbsolute,
     CursorPos,
     Hello,
+    PeerPlatform,
     ReceiverSensitivity,
     /// Variable-length clipboard frame; not decodable through the
     /// fixed-size [`MAX_EVENT_SIZE`] buffer path. See
@@ -263,6 +303,7 @@ impl ProtoEvent {
             ProtoEvent::MotionAbsolute { .. } => EventType::MotionAbsolute,
             ProtoEvent::CursorPos { .. } => EventType::CursorPos,
             ProtoEvent::Hello { .. } => EventType::Hello,
+            ProtoEvent::PeerPlatform(_) => EventType::PeerPlatform,
             ProtoEvent::ReceiverSensitivity { .. } => EventType::ReceiverSensitivity,
             ProtoEvent::Clipboard { .. } => EventType::Clipboard,
         }
@@ -344,6 +385,7 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
                 }
                 Ok(Self::Hello { magic, commit })
             }
+            EventType::PeerPlatform => Ok(Self::PeerPlatform(decode_u8(&mut buf)?.try_into()?)),
             EventType::ReceiverSensitivity => Ok(Self::ReceiverSensitivity {
                 mouse_sensitivity: decode_f64(&mut buf)?,
             }),
@@ -447,6 +489,9 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                     for b in commit.iter() {
                         encode_u8(buf, len, *b);
                     }
+                }
+                ProtoEvent::PeerPlatform(platform) => {
+                    encode_u8(buf, len, platform.into());
                 }
                 ProtoEvent::ReceiverSensitivity { mouse_sensitivity } => {
                     encode_f64(buf, len, mouse_sensitivity);
@@ -665,5 +710,16 @@ mod tests {
             decoded,
             ProtoEvent::Hello { magic, .. } if magic == PROTOCOL_MAGIC
         ));
+    }
+
+    #[test]
+    fn peer_platform_round_trip() {
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) =
+            ProtoEvent::PeerPlatform(PeerPlatform::Linux).into();
+        assert!(len <= MAX_EVENT_SIZE);
+        match buf.try_into().expect("decode") {
+            ProtoEvent::PeerPlatform(PeerPlatform::Linux) => {}
+            other => panic!("expected PeerPlatform(Linux), got {other}"),
+        }
     }
 }

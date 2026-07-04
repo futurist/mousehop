@@ -617,6 +617,10 @@ pub enum FrontendEvent {
     /// peers can bias their connection attempts toward the right
     /// interface on multi-homed hosts.
     MdnsDiscovery(bool),
+    /// Whether this host should rewrite outgoing macOS Command key
+    /// presses as Control when the target peer advertises Windows or
+    /// Linux. No effect for macOS targets or non-macOS senders.
+    MacosCommandAsControl(bool),
     /// Snapshot of the host-OS clipboard-suppression list. Pushed
     /// on Sync and after every Add/Remove so the GUI never has to
     /// query. The strings are opaque platform identifiers in the
@@ -702,6 +706,9 @@ pub enum FrontendRequest {
     SetIncomingPeerSensitivity(String, f64),
     /// turn mDNS-SD discovery on or off
     SetMdnsDiscovery(bool),
+    /// Toggle outgoing macOS Command->Control remapping for
+    /// Windows/Linux targets.
+    SetMacosCommandAsControl(bool),
     /// Toggle whether clipboard changes on this device propagate to
     /// the given outgoing client. Per-pair send-side gate.
     SetClientClipboardSend(ClientHandle, bool),

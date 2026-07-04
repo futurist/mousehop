@@ -590,6 +590,9 @@ fn build_ui(app: &Application) {
                     FrontendEvent::MdnsDiscovery(enabled) => {
                         window.set_mdns_discovery(enabled);
                     }
+                    FrontendEvent::MacosCommandAsControl(enabled) => {
+                        window.set_macos_command_as_control(enabled);
+                    }
                     FrontendEvent::SuppressedAppsUpdated(apps) => {
                         window.set_suppressed_apps(apps);
                     }

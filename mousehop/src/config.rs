@@ -79,6 +79,10 @@ struct ConfigToml {
     /// blindly. Default true; turn off on networks where mDNS
     /// multicast (224.0.0.251) is firewalled.
     mdns_discovery: Option<bool>,
+    /// On a macOS source device, rewrite outgoing Command/Super key
+    /// events as Control when the target peer advertises Windows or
+    /// Linux. Defaults to false.
+    macos_command_as_control: Option<bool>,
     cert_path: Option<PathBuf>,
     clients: Option<Vec<TomlClient>>,
     authorized_fingerprints: Option<HashMap<String, IncomingPeerConfig>>,
@@ -622,6 +626,25 @@ impl Config {
         self.config_toml.as_mut().expect("config").mdns_discovery = Some(enabled);
     }
 
+    /// Whether outgoing macOS Command should behave like Control on
+    /// Windows/Linux targets. Defaults to false.
+    pub fn macos_command_as_control(&self) -> bool {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.macos_command_as_control)
+            .unwrap_or(false)
+    }
+
+    pub fn set_macos_command_as_control(&mut self, enabled: bool) {
+        if self.config_toml.is_none() {
+            self.config_toml = Some(Default::default());
+        }
+        self.config_toml
+            .as_mut()
+            .expect("config")
+            .macos_command_as_control = if enabled { Some(true) } else { None };
+    }
+
     /// set configured clients
     pub fn set_clients(&mut self, clients: Vec<ConfigClient>) {
         if clients.is_empty() {
@@ -796,5 +819,15 @@ mod connection_mode_tests {
         let cc: ConfigClient = parsed.into();
         assert_eq!(cc.mode, ConnectionMode::default());
         assert!(cc.network_locks.is_empty());
+    }
+
+    #[test]
+    fn macos_command_as_control_stays_implicit_by_default() {
+        let parsed: ConfigToml = toml::from_str("").expect("parse empty config");
+        assert_eq!(parsed.macos_command_as_control, None);
+
+        let parsed: ConfigToml =
+            toml::from_str("macos_command_as_control = true").expect("parse flag");
+        assert_eq!(parsed.macos_command_as_control, Some(true));
     }
 }
