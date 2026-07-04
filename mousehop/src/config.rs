@@ -642,7 +642,7 @@ impl Config {
         self.config_toml
             .as_mut()
             .expect("config")
-            .macos_command_as_control = enabled.then_some(true);
+            .macos_command_as_control = if enabled { Some(true) } else { None };
     }
 
     /// set configured clients
