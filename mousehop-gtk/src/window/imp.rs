@@ -60,6 +60,10 @@ pub struct Window {
     #[template_child]
     pub mdns_discovery_switch: TemplateChild<Switch>,
     #[template_child]
+    pub macos_command_as_control_row: TemplateChild<ActionRow>,
+    #[template_child]
+    pub macos_command_as_control_switch: TemplateChild<Switch>,
+    #[template_child]
     pub clipboard_privacy_row: TemplateChild<ActionRow>,
     #[template_child]
     pub clipboard_privacy_button: TemplateChild<Button>,
@@ -90,6 +94,8 @@ pub struct Window {
     pub release_threshold_handler: RefCell<Option<glib::SignalHandlerId>>,
     /// Same pattern for the mDNS-discovery switch.
     pub mdns_discovery_handler: RefCell<Option<glib::SignalHandlerId>>,
+    /// Same pattern for the macOS Command->Control switch.
+    pub macos_command_as_control_handler: RefCell<Option<glib::SignalHandlerId>>,
     /// Long-lived clipboard-privacy modal. Kept alive (rather than
     /// rebuilt on every open) so its `set_apps` calls can run from
     /// the SuppressedAppsUpdated event handler regardless of
@@ -371,6 +377,23 @@ impl ObjectImpl for Window {
             }
         ));
         self.mdns_discovery_handler.replace(Some(mdns_handler));
+
+        let command_switch = self.macos_command_as_control_switch.clone();
+        let command_handler = command_switch.connect_state_set(clone!(
+            #[weak(rename_to = window)]
+            obj,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, state| {
+                window.request_macos_command_as_control(state);
+                glib::Propagation::Proceed
+            }
+        ));
+        self.macos_command_as_control_handler
+            .replace(Some(command_handler));
+
+        #[cfg(not(target_os = "macos"))]
+        self.macos_command_as_control_row.set_visible(false);
 
         // Clipboard-privacy "Manage" button → open the modal.
         self.clipboard_privacy_button.connect_clicked(clone!(

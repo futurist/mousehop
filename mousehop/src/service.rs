@@ -182,6 +182,7 @@ impl Service {
             conn,
             config.release_bind(),
             config.release_threshold_px(),
+            config.macos_command_as_control(),
         );
         let emulation_backend = config.emulation_backend().map(|b| b.into());
         let emulation = Emulation::new(emulation_backend, listener);
@@ -407,6 +408,12 @@ impl Service {
                 self.config.set_mdns_discovery(enabled);
                 self.discovery.set_enabled(enabled);
                 self.notify_frontend(FrontendEvent::MdnsDiscovery(enabled));
+                self.save_config().await;
+            }
+            FrontendRequest::SetMacosCommandAsControl(enabled) => {
+                self.config.set_macos_command_as_control(enabled);
+                self.capture.set_macos_command_as_control(enabled);
+                self.notify_frontend(FrontendEvent::MacosCommandAsControl(enabled));
                 self.save_config().await;
             }
             FrontendRequest::SetClientClipboardSend(handle, enabled) => {
@@ -647,6 +654,12 @@ impl Service {
         let release_threshold = self.config.release_threshold_px();
         self.capture.set_release_threshold(release_threshold);
         self.notify_frontend(FrontendEvent::ReleaseThreshold(release_threshold));
+        let macos_command_as_control = self.config.macos_command_as_control();
+        self.capture
+            .set_macos_command_as_control(macos_command_as_control);
+        self.notify_frontend(FrontendEvent::MacosCommandAsControl(
+            macos_command_as_control,
+        ));
         let authorized_keys = self.config.authorized_fingerprints();
         self.authorized_keys
             .write()
@@ -1030,6 +1043,9 @@ impl Service {
         ));
         self.notify_frontend(FrontendEvent::ReleaseBind(self.config.release_bind()));
         self.notify_frontend(FrontendEvent::MdnsDiscovery(self.config.mdns_discovery()));
+        self.notify_frontend(FrontendEvent::MacosCommandAsControl(
+            self.config.macos_command_as_control(),
+        ));
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
         let host_list = self.config.clipboard_suppression().host().clone();

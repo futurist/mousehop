@@ -10,7 +10,7 @@ use input_capture::{
 };
 use input_event::{Event, KeyboardEvent, scancode};
 use local_channel::mpsc::{Receiver, Sender, channel};
-use mousehop_proto::ProtoEvent;
+use mousehop_proto::{PeerPlatform, ProtoEvent};
 use tokio::task::{JoinHandle, spawn_local};
 use tokio_util::sync::CancellationToken;
 
@@ -79,6 +79,8 @@ enum CaptureRequest {
     SetReleaseBind(Vec<scancode::Linux>),
     /// set the auto-release pixel threshold (macOS only). 0 disables.
     SetReleaseThreshold(u32),
+    /// Toggle macOS Command->Control remapping for Windows/Linux targets.
+    SetMacosCommandAsControl(bool),
 }
 
 impl Capture {
@@ -87,6 +89,7 @@ impl Capture {
         conn: MousehopConnection,
         release_bind: Vec<scancode::Linux>,
         release_threshold_px: u32,
+        macos_command_as_control: bool,
     ) -> Self {
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();
@@ -98,6 +101,8 @@ impl Capture {
             captures: Default::default(),
             conn,
             event_tx,
+            macos_command_as_control: Rc::new(RefCell::new(macos_command_as_control)),
+            peer_platforms: Default::default(),
             request_rx,
             release_bind: Rc::new(RefCell::new(release_bind)),
             release_threshold_px: Rc::new(RefCell::new(release_threshold_px)),
@@ -163,6 +168,12 @@ impl Capture {
             .request_tx
             .send(CaptureRequest::SetReleaseThreshold(threshold));
     }
+
+    pub(crate) fn set_macos_command_as_control(&mut self, enabled: bool) {
+        let _ = self
+            .request_tx
+            .send(CaptureRequest::SetMacosCommandAsControl(enabled));
+    }
 }
 
 /// debounce a statement `$st`, i.e. the statement is executed only if the
@@ -189,6 +200,8 @@ struct CaptureTask {
     captures: Vec<(CaptureHandle, Position, CaptureType)>,
     conn: MousehopConnection,
     event_tx: Sender<ICaptureEvent>,
+    macos_command_as_control: Rc<RefCell<bool>>,
+    peer_platforms: std::collections::HashMap<CaptureHandle, PeerPlatform>,
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
     release_threshold_px: Rc<RefCell<u32>>,
     request_rx: Receiver<CaptureRequest>,
@@ -243,6 +256,9 @@ impl CaptureTask {
                         }
                         CaptureRequest::SetReleaseThreshold(threshold) => {
                             *self.release_threshold_px.borrow_mut() = threshold;
+                        }
+                        CaptureRequest::SetMacosCommandAsControl(enabled) => {
+                            *self.macos_command_as_control.borrow_mut() = enabled;
                         }
                     },
                     _ = self.cancellation_token.cancelled() => return,
@@ -363,6 +379,12 @@ impl CaptureTask {
                                 .send(ICaptureEvent::PeerCommitUpdated(handle))
                                 .expect("channel closed");
                         }
+                        ProtoEvent::PeerPlatform(PeerPlatform::Unknown) => {
+                            self.peer_platforms.remove(&handle);
+                        }
+                        ProtoEvent::PeerPlatform(platform) => {
+                            self.peer_platforms.insert(handle, platform);
+                        }
                         _ => {}
                     }
                 },
@@ -376,6 +398,7 @@ impl CaptureTask {
                     CaptureRequest::Destroy(h) => {
                         let pos = self.get_pos(h);
                         self.remove_capture(h);
+                        self.peer_platforms.remove(&h);
                         capture.destroy(h).await?;
                         // Drop the cached geometry — the next client
                         // added at this position may report different
@@ -392,6 +415,9 @@ impl CaptureTask {
                     CaptureRequest::SetReleaseThreshold(threshold) => {
                         *self.release_threshold_px.borrow_mut() = threshold;
                         capture.set_release_threshold(threshold);
+                    }
+                    CaptureRequest::SetMacosCommandAsControl(enabled) => {
+                        *self.macos_command_as_control.borrow_mut() = enabled;
                     }
                 },
                 _ = self.cancellation_token.cancelled() => break,
@@ -481,6 +507,12 @@ impl CaptureTask {
             },
             CaptureEvent::AutoRelease => unreachable!("handled in early return above"),
         };
+        let proto_event = remap_outgoing_event_for_target(
+            proto_event,
+            *self.macos_command_as_control.borrow(),
+            PeerPlatform::current(),
+            self.peer_platforms.get(&handle).copied(),
+        );
 
         if let Err(e) = self.conn.send(proto_event, handle).await {
             const DUR: Duration = Duration::from_millis(500);
@@ -547,6 +579,12 @@ impl CaptureTask {
                     key: key as u32,
                     state: 0,
                 }));
+                let key_up = remap_outgoing_event_for_target(
+                    key_up,
+                    *self.macos_command_as_control.borrow(),
+                    PeerPlatform::current(),
+                    self.peer_platforms.get(&handle).copied(),
+                );
                 if let Err(e) = self.conn.send(key_up, handle).await {
                     log::warn!("failed to send key-up to client {handle}: {e}");
                 }
@@ -562,6 +600,12 @@ impl CaptureTask {
                 locked: 0,
                 group: 0,
             }));
+            let mods_zero = remap_outgoing_event_for_target(
+                mods_zero,
+                *self.macos_command_as_control.borrow(),
+                PeerPlatform::current(),
+                self.peer_platforms.get(&handle).copied(),
+            );
             if let Err(e) = self.conn.send(mods_zero, handle).await {
                 log::warn!("failed to reset modifiers on client {handle}: {e}");
             }
@@ -583,6 +627,54 @@ enum State {
     #[default]
     WaitingForAck,
     Sending,
+}
+
+const XMOD_CONTROL_MASK: u32 = 1 << 2;
+const XMOD_MOD4_MASK: u32 = 1 << 6;
+
+fn remap_outgoing_event_for_target(
+    event: ProtoEvent,
+    enabled: bool,
+    source: PeerPlatform,
+    target: Option<PeerPlatform>,
+) -> ProtoEvent {
+    if !(enabled
+        && source == PeerPlatform::MacOs
+        && matches!(target, Some(PeerPlatform::Windows | PeerPlatform::Linux)))
+    {
+        return event;
+    }
+
+    match event {
+        ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key { time, key, state })) => {
+            let key = match scancode::Linux::try_from(key) {
+                Ok(scancode::Linux::KeyLeftMeta) => scancode::Linux::KeyLeftCtrl as u32,
+                Ok(scancode::Linux::KeyRightmeta) => scancode::Linux::KeyRightCtrl as u32,
+                _ => key,
+            };
+            ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key { time, key, state }))
+        }
+        ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Modifiers {
+            depressed,
+            latched,
+            locked,
+            group,
+        })) => ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Modifiers {
+            depressed: remap_command_modifier_bits(depressed),
+            latched: remap_command_modifier_bits(latched),
+            locked: remap_command_modifier_bits(locked),
+            group,
+        })),
+        other => other,
+    }
+}
+
+fn remap_command_modifier_bits(bits: u32) -> u32 {
+    if bits & XMOD_MOD4_MASK == 0 {
+        bits
+    } else {
+        (bits & !XMOD_MOD4_MASK) | XMOD_CONTROL_MASK
+    }
 }
 
 fn to_capture_pos(pos: mousehop_ipc::Position) -> input_capture::Position {
@@ -621,5 +713,100 @@ impl<T> Drop for DropGuard<T> {
         self.tx
             .send(self.on_drop.take().expect("item"))
             .expect("channel closed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remaps_command_key_to_control_for_windows_and_linux_targets() {
+        let key = ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key {
+            time: 0,
+            key: scancode::Linux::KeyLeftMeta as u32,
+            state: 1,
+        }));
+        match remap_outgoing_event_for_target(
+            key,
+            true,
+            PeerPlatform::MacOs,
+            Some(PeerPlatform::Windows),
+        ) {
+            ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, .. })) => {
+                assert_eq!(key, scancode::Linux::KeyLeftCtrl as u32);
+            }
+            other => panic!("expected key event, got {other}"),
+        }
+    }
+
+    #[test]
+    fn remaps_command_modifier_mask_to_control_mask() {
+        let event = ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Modifiers {
+            depressed: XMOD_MOD4_MASK,
+            latched: XMOD_MOD4_MASK,
+            locked: XMOD_MOD4_MASK,
+            group: 0,
+        }));
+        match remap_outgoing_event_for_target(
+            event,
+            true,
+            PeerPlatform::MacOs,
+            Some(PeerPlatform::Linux),
+        ) {
+            ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Modifiers {
+                depressed,
+                latched,
+                locked,
+                ..
+            })) => {
+                assert_eq!(depressed, XMOD_CONTROL_MASK);
+                assert_eq!(latched, XMOD_CONTROL_MASK);
+                assert_eq!(locked, XMOD_CONTROL_MASK);
+            }
+            other => panic!("expected modifier event, got {other}"),
+        }
+    }
+
+    #[test]
+    fn leaves_events_unchanged_when_feature_disabled_or_target_is_macos() {
+        let key = ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key {
+            time: 0,
+            key: scancode::Linux::KeyLeftMeta as u32,
+            state: 1,
+        }));
+        match remap_outgoing_event_for_target(
+            key.clone(),
+            false,
+            PeerPlatform::MacOs,
+            Some(PeerPlatform::Windows),
+        ) {
+            ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, .. })) => {
+                assert_eq!(key, scancode::Linux::KeyLeftMeta as u32);
+            }
+            other => panic!("expected key event, got {other}"),
+        }
+        match remap_outgoing_event_for_target(
+            key.clone(),
+            true,
+            PeerPlatform::MacOs,
+            Some(PeerPlatform::MacOs),
+        ) {
+            ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, .. })) => {
+                assert_eq!(key, scancode::Linux::KeyLeftMeta as u32);
+            }
+            other => panic!("expected key event, got {other}"),
+        }
+        match remap_outgoing_event_for_target(
+            key,
+            true,
+            PeerPlatform::Linux,
+            Some(PeerPlatform::Windows),
+        ) {
+            ProtoEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, .. })) => {
+                assert_eq!(key, scancode::Linux::KeyLeftMeta as u32);
+            }
+            other => panic!("expected key event, got {other}"),
+        }
     }
 }

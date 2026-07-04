@@ -368,6 +368,10 @@ release_bind = [ "KeyA", "KeyS", "KeyD", "KeyF" ]
 # optional port (defaults to 4252)
 port = 4252
 
+# on a macOS source device, send Command as Control when the
+# target peer advertises Windows or Linux
+macos_command_as_control = true
+
 # list of authorized tls certificate fingerprints that
 # are accepted for incoming traffic
 [authorized_fingerprints]
@@ -427,6 +431,18 @@ offers:
 under a `network_locks` table (keyed by network fingerprint, numeric
 IPs only). Discovered addresses, latency, and interface labels are live
 runtime state and are not persisted.
+
+### macOS Command → Control on Windows/Linux targets
+
+If your center/source device is a Mac and you want `Cmd+C`, `Cmd+V`,
+and similar muscle memory to work on Windows or Linux targets, enable
+`macos_command_as_control = true` in `config.toml` or toggle **General
+→ Command acts as Control** in the GUI.
+
+When enabled, Mousehop rewrites outgoing macOS Command/Super key events
+to Control **only** when the remote peer advertises Windows or Linux.
+macOS targets keep the native Command behavior, and older peers that do
+not advertise a platform keep the existing passthrough behavior.
 
 ## Clipboard Sync
 

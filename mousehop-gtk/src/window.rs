@@ -551,6 +551,10 @@ impl Window {
         self.request(FrontendRequest::SetMdnsDiscovery(enabled));
     }
 
+    pub(super) fn request_macos_command_as_control(&self, enabled: bool) {
+        self.request(FrontendRequest::SetMacosCommandAsControl(enabled));
+    }
+
     /// Forward the daemon's running-apps snapshot to the modal (if
     /// it's been created). No-op when the user hasn't opened the
     /// privacy window yet, since the picker is built lazily.
@@ -738,6 +742,20 @@ impl Window {
         let imp = self.imp();
         let switch = &imp.mdns_discovery_switch;
         let handler = imp.mdns_discovery_handler.borrow();
+        if let Some(id) = handler.as_ref() {
+            switch.block_signal(id);
+        }
+        switch.set_active(enabled);
+        switch.set_state(enabled);
+        if let Some(id) = handler.as_ref() {
+            switch.unblock_signal(id);
+        }
+    }
+
+    pub(super) fn set_macos_command_as_control(&self, enabled: bool) {
+        let imp = self.imp();
+        let switch = &imp.macos_command_as_control_switch;
+        let handler = imp.macos_command_as_control_handler.borrow();
         if let Some(id) = handler.as_ref() {
             switch.block_signal(id);
         }

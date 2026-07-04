@@ -7,7 +7,7 @@ use input_emulation::{
 use input_event::{ClipboardEvent, Event};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use mousehop_ipc::IncomingPeerConfig;
-use mousehop_proto::{Position, ProtoEvent};
+use mousehop_proto::{PeerPlatform, Position, ProtoEvent};
 use std::{
     cell::Cell,
     collections::HashMap,
@@ -311,8 +311,13 @@ impl ListenTask {
                             // the peer is in fact happily talking to us.
                             ProtoEvent::Hello { commit, .. } => {
                                 self.listener.reply(addr, ProtoEvent::hello(local_commit())).await;
+                                self.listener.reply(
+                                    addr,
+                                    ProtoEvent::PeerPlatform(PeerPlatform::current()),
+                                ).await;
                                 self.event_tx.send(EmulationEvent::PeerHello { addr, commit }).expect("channel closed");
                             }
+                            ProtoEvent::PeerPlatform(_) => {}
                             // Capturing peer told us where on its own
                             // screen the user's cursor was, as a
                             // normalized fraction (nx, ny) ∈ [0, 1]

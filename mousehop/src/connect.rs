@@ -4,8 +4,8 @@ use crate::discovery::{PrimaryCache, normalize_mdns_name};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use mousehop_ipc::{ClientHandle, ConnectionMode, DEFAULT_PORT};
 use mousehop_proto::{
-    MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, ProtoEvent, decode_clipboard_event,
-    encode_clipboard_event,
+    MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, PeerPlatform, ProtoEvent,
+    decode_clipboard_event, encode_clipboard_event,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -305,7 +305,7 @@ impl MousehopConnection {
                     Ok(_) => {}
                     Err(e) => {
                         log::warn!("client {handle} failed to send: {e}");
-                        disconnect(&self.client_manager, handle, addr, &self.conns).await;
+                        disconnect(&self.client_manager, handle, addr, &self.conns, None).await;
                     }
                 }
                 log::trace!("{event_display} >->->->->- {addr}");
@@ -522,12 +522,17 @@ async fn hello_handshake(
     hello_ok: Rc<Cell<bool>>,
 ) {
     let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::hello(local_commit()).into();
+    let (platform_buf, platform_len): ([u8; MAX_EVENT_SIZE], usize) =
+        ProtoEvent::PeerPlatform(PeerPlatform::current()).into();
     for _ in 0..HELLO_MAX_ATTEMPTS {
         if hello_ok.get() {
             return;
         }
         if let Err(e) = conn.send(&buf[..len]).await {
             log::debug!("hello send to {addr} failed: {e}");
+        }
+        if let Err(e) = conn.send(&platform_buf[..platform_len]).await {
+            log::debug!("peer-platform send to {addr} failed: {e}");
         }
         tokio::time::sleep(HELLO_RETRY_INTERVAL).await;
     }
@@ -642,11 +647,14 @@ async fn receive_loop(
                 tx.send((handle, ProtoEvent::hello(commit)))
                     .expect("channel closed");
             }
+            ProtoEvent::PeerPlatform(platform) => tx
+                .send((handle, ProtoEvent::PeerPlatform(platform)))
+                .expect("channel closed"),
             event => tx.send((handle, event)).expect("channel closed"),
         }
     }
     log::debug!("{addr}: receive loop ended");
-    disconnect(&client_manager, handle, addr, &conns).await;
+    disconnect(&client_manager, handle, addr, &conns, Some(&tx)).await;
 }
 
 /// Classify the first byte of a DTLS datagram and dispatch through
@@ -670,11 +678,15 @@ async fn disconnect(
     handle: ClientHandle,
     addr: SocketAddr,
     conns: &Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>,
+    tx: Option<&Sender<(ClientHandle, ProtoEvent)>>,
 ) {
     log::warn!("client ({handle}) @ {addr} connection closed");
     conns.lock().await.remove(&addr);
     client_manager.set_active_addr(handle, None);
     client_manager.set_peer_commit(handle, None);
+    if let Some(tx) = tx {
+        let _ = tx.send((handle, ProtoEvent::PeerPlatform(PeerPlatform::Unknown)));
+    }
     let active: Vec<SocketAddr> = conns.lock().await.keys().copied().collect();
     log::info!("active connections: {active:?}");
 }
