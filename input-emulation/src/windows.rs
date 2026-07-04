@@ -78,6 +78,12 @@ pub(crate) struct WindowsEmulation {
     repeat_task: Option<AbortHandle>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum CursorWarpRequest {
+    Absolute { dx: i32, dy: i32 },
+    Fallback { x: i32, y: i32 },
+}
+
 impl WindowsEmulation {
     pub(crate) fn new() -> Result<Self, WindowsEmulationCreationError> {
         Ok(Self { repeat_task: None })
@@ -146,28 +152,55 @@ impl Emulation for WindowsEmulation {
     }
 
     async fn warp_cursor(&mut self, x: i32, y: i32) -> Result<(), EmulationError> {
-        if let Some((width, height)) = self.display_bounds() {
-            // Route entry warps through SendInput's absolute-motion path
-            // instead of SetCursorPos. Hyper-V and similar pointer-
-            // capturing windows can lose the visible cursor when we
-            // teleport it out-of-band, but they do track injected
-            // absolute mouse motion on the virtual desktop correctly.
-            let mi = MOUSEINPUT {
-                dx: normalize_absolute_axis(x, width),
-                dy: normalize_absolute_axis(y, height),
-                mouseData: 0,
-                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-                time: 0,
-                dwExtraInfo: 0,
-            };
-            send_mouse_input(mi);
-        } else {
-            unsafe {
-                let _ = SetCursorPos(x, y);
+        match cursor_warp_request(self.display_bounds(), x, y) {
+            CursorWarpRequest::Absolute { dx, dy } => {
+                // Route entry warps through SendInput's absolute-motion
+                // path instead of SetCursorPos. Hyper-V and similar
+                // pointer-capturing windows can lose the visible cursor
+                // when we teleport it out-of-band, but they do track
+                // injected absolute mouse motion on the virtual desktop
+                // correctly.
+                let mi = MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0,
+                };
+                send_mouse_input(mi);
             }
+            CursorWarpRequest::Fallback { x, y } => unsafe {
+                let _ = SetCursorPos(x, y);
+            },
         }
         Ok(())
     }
+}
+
+fn cursor_warp_request(bounds: Option<(u32, u32)>, x: i32, y: i32) -> CursorWarpRequest {
+    if let Some((width, height)) = bounds {
+        CursorWarpRequest::Absolute {
+            dx: normalize_absolute_axis(x, width),
+            dy: normalize_absolute_axis(y, height),
+        }
+    } else {
+        CursorWarpRequest::Fallback { x, y }
+    }
+}
+
+/// Convert a union-relative desktop coordinate into the 0..=65535
+/// range required by `SendInput` absolute mouse motion.
+///
+/// Windows interprets absolute mouse `dx`/`dy` as normalized virtual-
+/// desktop coordinates, so the receiving pixel index must be clamped to
+/// the display extent and then scaled onto that full 16-bit domain.
+fn normalize_absolute_axis(pos: i32, size: u32) -> i32 {
+    let max_index = i64::from(size.saturating_sub(1));
+    if max_index <= 0 {
+        return 0;
+    }
+    (i64::from(pos).clamp(0, max_index) * 65_535 / max_index) as i32
 }
 
 impl WindowsEmulation {
@@ -217,16 +250,6 @@ fn send_keyboard_input(ki: KEYBDINPUT) {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 { ki },
     });
-}
-
-/// Convert a union-relative desktop coordinate into the 0..=65535
-/// range expected by `SendInput` absolute mouse motion.
-fn normalize_absolute_axis(pos: i32, size: u32) -> i32 {
-    let max_index = i64::from(size.saturating_sub(1));
-    if max_index <= 0 {
-        return 0;
-    }
-    (i64::from(pos).clamp(0, max_index) * 65_535 / max_index) as i32
 }
 
 fn rel_mouse(dx: i32, dy: i32) {
@@ -340,7 +363,7 @@ fn linux_keycode_to_windows_scancode(linux_keycode: u32) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_absolute_axis;
+    use super::{CursorWarpRequest, cursor_warp_request, normalize_absolute_axis};
 
     #[test]
     fn normalize_absolute_axis_clamps_to_virtual_desktop_range() {
@@ -355,5 +378,13 @@ mod tests {
         assert_eq!(normalize_absolute_axis(0, 0), 0);
         assert_eq!(normalize_absolute_axis(0, 1), 0);
         assert_eq!(normalize_absolute_axis(10, 1), 0);
+    }
+
+    #[test]
+    fn cursor_warp_request_uses_fallback_without_bounds() {
+        assert_eq!(
+            cursor_warp_request(None, 12, 34),
+            CursorWarpRequest::Fallback { x: 12, y: 34 }
+        );
     }
 }
