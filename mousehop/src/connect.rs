@@ -685,7 +685,8 @@ async fn disconnect(
     client_manager.set_active_addr(handle, None);
     client_manager.set_peer_commit(handle, None);
     if let Some(tx) = tx {
-        let _ = tx.send((handle, ProtoEvent::PeerPlatform(PeerPlatform::Unknown)));
+        tx.send((handle, ProtoEvent::PeerPlatform(PeerPlatform::Unknown)))
+            .expect("channel closed");
     }
     let active: Vec<SocketAddr> = conns.lock().await.keys().copied().collect();
     log::info!("active connections: {active:?}");
