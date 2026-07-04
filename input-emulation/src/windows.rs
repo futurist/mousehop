@@ -11,9 +11,9 @@ use std::time::Duration;
 use tokio::task::AbortHandle;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT_0, KEYEVENTF_EXTENDEDKEY, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, SendInput,
@@ -146,8 +146,25 @@ impl Emulation for WindowsEmulation {
     }
 
     async fn warp_cursor(&mut self, x: i32, y: i32) -> Result<(), EmulationError> {
-        unsafe {
-            let _ = SetCursorPos(x, y);
+        if let Some((width, height)) = self.display_bounds() {
+            // Route entry warps through SendInput's absolute-motion path
+            // instead of SetCursorPos. Hyper-V and similar pointer-
+            // capturing windows can lose the visible cursor when we
+            // teleport it out-of-band, but they do track injected
+            // absolute mouse motion on the virtual desktop correctly.
+            let mi = MOUSEINPUT {
+                dx: normalize_absolute_axis(x, width),
+                dy: normalize_absolute_axis(y, height),
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                time: 0,
+                dwExtraInfo: 0,
+            };
+            send_mouse_input(mi);
+        } else {
+            unsafe {
+                let _ = SetCursorPos(x, y);
+            }
         }
         Ok(())
     }
@@ -201,6 +218,15 @@ fn send_keyboard_input(ki: KEYBDINPUT) {
         Anonymous: INPUT_0 { ki },
     });
 }
+
+fn normalize_absolute_axis(pos: i32, size: u32) -> i32 {
+    let max_index = i64::from(size.saturating_sub(1));
+    if max_index <= 0 {
+        return 0;
+    }
+    (i64::from(pos).clamp(0, max_index) * 65_535 / max_index) as i32
+}
+
 fn rel_mouse(dx: i32, dy: i32) {
     let mi = MOUSEINPUT {
         dx,
@@ -308,4 +334,24 @@ fn linux_keycode_to_windows_scancode(linux_keycode: u32) -> Option<u16> {
     };
     log::trace!("windows code: {windows_scancode:?}");
     Some(windows_scancode as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_absolute_axis;
+
+    #[test]
+    fn normalize_absolute_axis_clamps_to_virtual_desktop_range() {
+        assert_eq!(normalize_absolute_axis(-10, 1920), 0);
+        assert_eq!(normalize_absolute_axis(0, 1920), 0);
+        assert_eq!(normalize_absolute_axis(1919, 1920), 65_535);
+        assert_eq!(normalize_absolute_axis(9_999, 1920), 65_535);
+    }
+
+    #[test]
+    fn normalize_absolute_axis_handles_single_pixel_extent() {
+        assert_eq!(normalize_absolute_axis(0, 0), 0);
+        assert_eq!(normalize_absolute_axis(0, 1), 0);
+        assert_eq!(normalize_absolute_axis(10, 1), 0);
+    }
 }
